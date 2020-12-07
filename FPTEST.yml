@@ -1,0 +1,134 @@
+---
+- hosts: all
+  become: true
+  gather_facts: yes
+  ignore_errors: yes
+  tasks:
+   - name: Running prechecks
+     shell: /usr/bin/pre_postcheck.sh PRE 2> /dev/null
+     register: pre_check_out
+
+   - name: precheck results
+     debug:
+      msg: "{{ pre_check_out.stdout_lines }}"
+
+   - name: Patching the server
+     yum:
+       name: "*"
+       exclude:
+        - mariadb*
+        - httpd*
+        - mysql*
+       state: latest
+
+   - name: Check if reboot is required
+     command: needs-restarting -r
+     register: reboot_output
+
+   - name: Reboot the server
+     reboot:
+       msg: "Patching is complete. Reboot initiated by Ansible"
+       connect_timeout: 5
+       reboot_timeout: 600
+       pre_reboot_delay: 0
+       post_reboot_delay: 60
+       test_command: whoami
+     when: reboot_output.rc == 1
+
+   - name: Running Postchecks
+     shell: /usr/bin/pre_postcheck.sh POST 2> /dev/null
+     register: post_check_out
+
+   - name: post_check results
+     debug:
+      msg: "{{ post_check_out.stdout_lines }}"
+
+   - name: Check if the services are running
+     service:
+      name: "{{ item }}"
+      state: started
+     register: services_output
+     loop:
+       - ntpd
+       - resamad
+       - besclient
+
+   - debug: var=services_output.stdout_lines
+
+   - name: Check for the ITM6 agent service
+     shell: /opt/IBM/ITM/bin/cinfo -r
+     register: ITM6_output
+
+   - name: Notify if the service is not running
+     debug: msg="ITM service is not running on {{ ansible_hostname }}, please check"
+     when: ITM6_output.stdout.find('no known processes are running') != -1
+
+   - name: Check if httpd service is running
+     service:
+      name: httpd
+      state: started
+     register: httpd_output
+     when: ansible_hostname == "defr04sl-ww31v.pan.eu"
+
+   - name: Notify if httpd is not running
+     debug: msg="httpd is not running on {{ ansible_hostname }}, please check"
+     when: httpd_output.rc != 0
+
+   - name: Check if vsftpd service is running
+     service:
+      name: vsftpd
+      state: started
+     register: vsftpd_output
+     when: ansible_hostname == "defr04sl-fp01v"
+
+   - name: Notify if vsftpd is not running
+     debug: msg="vsftpd is not running on {{ ansible_hostname }}, please check"
+     when: vsftpd_output.rc != 0
+
+   - name: Check if postfix service is running
+     file:
+      path: /tmp/finaltest
+      state: touch
+     when: ansible_hostname == "Client-RHEL-1" or ansible_hostname == "Client-RHEL-2" or ansible_hostname == "Client-RHEL-3"
+
+   - name: Notify if postfix is not running
+     debug: msg="postfix is not running on {{ ansible_hostname }}, please check"
+     when: postfix_output.rc != 0
+
+   - name: Mount point checks in /proc/mounts
+     shell: grep "/var/ftp/home/dw_jupiter/dw/customerB2E" /tmp/mounts | grep -v "^#"
+     register: presence_B2E
+     check_mode: no
+     ignore_errors: yes
+     changed_when: no
+     when: ansible_hostname == "defr04sl-fp01v"
+
+   - name: Notify when mount points are not present
+     debug: msg="Mount points entry "/var/ftp/home/dw_jupiter/dw/customerB2E" does not exist in {{ ansible_hostname }}, please check"
+     when: ansible_hostname == "defr04sl-fp01v" and presence_B2E.rc != 0
+
+   - name: Mount point checks in /proc/mounts
+     shell: grep "/var/ftp/p_mdm/gCRM-MDM-Prod" /tmp/mounts | grep -v "^#"
+     register: presence_MDM
+     check_mode: no
+     ignore_errors: yes
+     changed_when: no
+     when: ansible_hostname == "defr04sl-fp01v"
+
+   - name: Notify when mount points are not present
+     debug: msg="Mount point entry "/var/ftp/p_mdm/gCRM-MDM-Prod" does not exist in {{ ansible_hostname }}, please check"
+     when: ansible_hostname == "defr04sl-fp01v" and presence_MDM.rc != 1
+
+   - name: Verify the patching
+     shell: yum --exclude=kernel*,systemd* update
+     register: patch_verify
+
+   - name: Notify the patch complete status
+     debug:
+      msg: "All the packages are uptodate"
+     when: patch_verify.rc == 0
+
+   - name: Notiy the patch fail status
+     debug:
+      msg: "Packages does not seem uptodate. Please check manually"
+     when: patch_verify.rc != 0
